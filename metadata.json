@@ -1,0 +1,6 @@
+{
+  "name": "AegisGuard Personal Safety Platform",
+  "description": "Browser-based intelligent personal safety platform with manual SOS, Random Forest movement classification, GPS tracking, voice command detection, shake detection, safe journey monitoring, and local-first privacy.",
+  "requestFramePermissions": ["geolocation", "microphone"],
+  "majorCapabilities": []
+}
