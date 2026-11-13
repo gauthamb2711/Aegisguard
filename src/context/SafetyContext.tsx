@@ -20,11 +20,13 @@ import {
   SafetyEvent,
   SafetyEventType,
   ShareChannel,
+  SimulatorScenario,
 } from '../types/safety';
 import { DEFAULT_SETTINGS, storageService } from '../services/storageService';
 import { locationService } from '../services/locationService';
 import {
   extractFeaturesFromWindow,
+  generateSyntheticSequence,
   mlTrainingService,
 } from '../services/mlTrainingService';
 import { motionService } from '../services/motionService';
@@ -84,12 +86,15 @@ interface SafetyContextValue {
     isSimulated: boolean
   ) => MLPrediction | null;
 
-  // Live Motion Sensor
+  // Live Motion Sensor + Desktop Simulated Stream Fallback
   motionApiAvailable: boolean;
   motionPermission: PermissionStatusType;
   isMotionMonitoring: boolean;
   isMotionPaused: boolean;
   hasHardwareMotionData: boolean;
+  hardwareProbeDone: boolean;
+  isSimStreamActive: boolean;
+  simStreamScenario: SimulatorScenario;
   motionSamples: MotionSample[];
   unusualMovementWarning: string | null;
   dismissUnusualWarning: () => void;
@@ -98,14 +103,23 @@ interface SafetyContextValue {
   pauseMotionMonitoring: () => void;
   resumeMotionMonitoring: () => void;
   stopMotionMonitoring: () => void;
+  startSimMotionStream: (scenario: SimulatorScenario) => void;
+  stopSimMotionStream: () => void;
 
-  // Voice Recognition
+  // Voice Recognition + Web Audio Mic Monitor
   voiceSupported: boolean;
+  micSupported: boolean;
   isVoiceListening: boolean;
+  isSpeechEngineActive: boolean;
+  micLevel: number;
+  voiceLang: string;
+  setVoiceLang: (lang: string) => void;
+  acousticSpikeEnabled: boolean;
+  setAcousticSpikeEnabled: (enabled: boolean) => void;
   voiceTranscript: string;
   voiceAlternatives: string[];
   voiceError: { code: string; message: string; recovery: string } | null;
-  startVoiceListening: () => void;
+  startVoiceListening: () => Promise<void>;
   stopVoiceListening: () => void;
 
   // Shake Detection
@@ -131,7 +145,6 @@ const SafetyContext = createContext<SafetyContextValue | null>(null);
 export const SafetyProvider: React.FC<{ children: React.ReactNode }> = ({
   children,
 }) => {
-  // Load initial storage safely
   const [settings, setSettings] = useState<AppSettings>(() => {
     return storageService.loadSettings().data;
   });
@@ -177,7 +190,7 @@ export const SafetyProvider: React.FC<{ children: React.ReactNode }> = ({
   const [latestPrediction, setLatestPrediction] =
     useState<MLPrediction | null>(null);
 
-  // Motion Sensor & Shake
+  // Motion Sensor & Desktop Simulator Stream
   const motionApiAvailable = motionService.isApiPresent();
   const [motionPermission, setMotionPermission] = useState<PermissionStatusType>(
     !motionApiAvailable
@@ -188,13 +201,21 @@ export const SafetyProvider: React.FC<{ children: React.ReactNode }> = ({
   );
   const [isMotionMonitoring, setIsMotionMonitoring] = useState(false);
   const [isMotionPaused, setIsMotionPaused] = useState(false);
+  const isMotionPausedRef = useRef(false);
   const [hasHardwareMotionData, setHasHardwareMotionData] = useState(false);
+  const [hardwareProbeDone, setHardwareProbeDone] = useState(false);
+  const [isSimStreamActive, setIsSimStreamActive] = useState(false);
+  const [simStreamScenario, setSimStreamScenario] =
+    useState<SimulatorScenario>('normal_walking');
   const [motionSamples, setMotionSamples] = useState<MotionSample[]>([]);
   const [unusualMovementWarning, setUnusualMovementWarning] = useState<
     string | null
   >(null);
+
   const motionUnsubscribeRef = useRef<(() => void) | null>(null);
+  const simIntervalRef = useRef<number | null>(null);
   const motionBufferRef = useRef<MotionSample[]>([]);
+  const lastUiSamplePushRef = useRef<number>(0);
   const lastMlCheckRef = useRef<number>(0);
 
   // Shake
@@ -202,9 +223,14 @@ export const SafetyProvider: React.FC<{ children: React.ReactNode }> = ({
   const [shakePeaksCount, setShakePeaksCount] = useState(0);
   const [shakeCooldownRemaining, setShakeCooldownRemaining] = useState(0);
 
-  // Voice
+  // Voice & Mic
   const voiceSupported = voiceRecognitionService.isSupported();
+  const micSupported = voiceRecognitionService.isMicrophoneSupported();
   const [isVoiceListening, setIsVoiceListening] = useState(false);
+  const [isSpeechEngineActive, setIsSpeechEngineActive] = useState(false);
+  const [micLevel, setMicLevel] = useState(0);
+  const [voiceLang, setVoiceLang] = useState('en-US');
+  const [acousticSpikeEnabled, setAcousticSpikeEnabled] = useState(true);
   const [voiceTranscript, setVoiceTranscript] = useState('');
   const [voiceAlternatives, setVoiceAlternatives] = useState<string[]>([]);
   const [voiceError, setVoiceError] = useState<{
@@ -212,14 +238,14 @@ export const SafetyProvider: React.FC<{ children: React.ReactNode }> = ({
     message: string;
     recovery: string;
   } | null>(null);
-  const voiceSessionRef = useRef<{ start: () => void; stop: () => void } | null>(
-    null
-  );
+  const voiceSessionRef = useRef<{
+    start: () => Promise<void>;
+    stop: () => void;
+  } | null>(null);
 
   // Journey timers
   const [nowTick, setNowTick] = useState(() => Date.now());
 
-  // Initialize ML model on mount
   useEffect(() => {
     try {
       const metrics = mlTrainingService.ensureTrained();
@@ -236,18 +262,19 @@ export const SafetyProvider: React.FC<{ children: React.ReactNode }> = ({
     }
   }, []);
 
-  // Check initial GPS permission
   useEffect(() => {
     void locationService.checkPermission().then((perm) => {
       setLocationPermission(perm);
     });
   }, []);
 
-  // Cleanup everything on unmount
   useEffect(() => {
     return () => {
       locationService.clearWatch(watchIdRef.current);
       motionUnsubscribeRef.current?.();
+      if (simIntervalRef.current !== null) {
+        window.clearInterval(simIntervalRef.current);
+      }
       voiceSessionRef.current?.stop();
       audioService.dispose();
     };
@@ -372,9 +399,12 @@ export const SafetyProvider: React.FC<{ children: React.ReactNode }> = ({
     }
   }, []);
 
-  // Journey location watcher
   useEffect(() => {
-    if (activeJourney && (activeJourney.status === 'ACTIVE' || activeJourney.status === 'CHECKIN_OVERDUE')) {
+    if (
+      activeJourney &&
+      (activeJourney.status === 'ACTIVE' ||
+        activeJourney.status === 'CHECKIN_OVERDUE')
+    ) {
       if (locationPermission === 'granted' && watchIdRef.current === null) {
         const id = locationService.watchPosition(
           (loc) => {
@@ -399,14 +429,17 @@ export const SafetyProvider: React.FC<{ children: React.ReactNode }> = ({
     }
   }, [activeJourney, locationPermission]);
 
-  // Journey ticker
   useEffect(() => {
     if (!activeJourney) return;
     const timer = window.setInterval(() => {
       const now = Date.now();
       setNowTick(now);
       setActiveJourney((prev) => {
-        if (!prev || prev.status === 'COMPLETED' || prev.status === 'SOS_ESCALATED') {
+        if (
+          !prev ||
+          prev.status === 'COMPLETED' ||
+          prev.status === 'SOS_ESCALATED'
+        ) {
           return prev;
         }
         if (now >= prev.nextCheckInDueAt && prev.status === 'ACTIVE') {
@@ -418,7 +451,10 @@ export const SafetyProvider: React.FC<{ children: React.ReactNode }> = ({
             status: 'CHECKIN_OVERDUE',
             missedCheckIns: prev.missedCheckIns + 1,
           };
-          storageService.saveJourney(updated, settings.localStorageConsentGranted);
+          storageService.saveJourney(
+            updated,
+            settings.localStorageConsentGranted
+          );
           const missedEvt = sosService.createEvent({
             type: 'JOURNEY_CHECKIN_MISSED',
             userConfirmed: false,
@@ -427,7 +463,10 @@ export const SafetyProvider: React.FC<{ children: React.ReactNode }> = ({
           });
           setEvents((evts) => {
             const nextEvts = [missedEvt, ...evts];
-            storageService.saveEvents(nextEvts, settings.localStorageConsentGranted);
+            storageService.saveEvents(
+              nextEvts,
+              settings.localStorageConsentGranted
+            );
             return nextEvts;
           });
           return updated;
@@ -436,7 +475,11 @@ export const SafetyProvider: React.FC<{ children: React.ReactNode }> = ({
       });
     }, 1000);
     return () => window.clearInterval(timer);
-  }, [activeJourney, settings.alertSoundEnabled, settings.localStorageConsentGranted]);
+  }, [
+    activeJourney,
+    settings.alertSoundEnabled,
+    settings.localStorageConsentGranted,
+  ]);
 
   // SOS Flows
   const requestSosConfirmation = useCallback(
@@ -467,13 +510,14 @@ export const SafetyProvider: React.FC<{ children: React.ReactNode }> = ({
         if (freshLoc) loc = freshLoc;
       }
 
-      const eventTypeMap: Record<PendingConfirmation['source'], SafetyEventType> = {
-        MANUAL: 'MANUAL_SOS',
-        VOICE: 'VOICE_TRIGGERED_SOS',
-        SHAKE: 'SHAKE_TRIGGERED_SOS',
-        MOVEMENT_ML: 'MANUAL_SOS',
-        JOURNEY_CHECKIN: 'MANUAL_SOS',
-      };
+      const eventTypeMap: Record<PendingConfirmation['source'], SafetyEventType> =
+        {
+          MANUAL: 'MANUAL_SOS',
+          VOICE: 'VOICE_TRIGGERED_SOS',
+          SHAKE: 'SHAKE_TRIGGERED_SOS',
+          MOVEMENT_ML: 'MANUAL_SOS',
+          JOURNEY_CHECKIN: 'MANUAL_SOS',
+        };
 
       const evt = sosService.createEvent({
         type: eventTypeMap[source],
@@ -621,16 +665,25 @@ export const SafetyProvider: React.FC<{ children: React.ReactNode }> = ({
       return status;
     }, []);
 
-  const handleIncomingMotionSample = useCallback(
+  const processMotionSample = useCallback(
     (sample: MotionSample) => {
-      setHasHardwareMotionData(true);
-      setMotionSamples((prev) => [...prev.slice(-59), sample]);
+      if (!sample.isSimulated) {
+        setHasHardwareMotionData(true);
+        setHardwareProbeDone(true);
+      }
 
-      const buffer = [...motionBufferRef.current.slice(-19), sample];
+      const now = Date.now();
+      const buffer = [...motionBufferRef.current.slice(-23), sample];
       motionBufferRef.current = buffer;
 
-      // Shake Detection when enabled
-      if (settings.shakeEnabled) {
+      // Throttle chart array pushes to ~10Hz so 60Hz mobile sensors never lag React
+      if (now - lastUiSamplePushRef.current >= 90 || sample.isSimulated) {
+        lastUiSamplePushRef.current = now;
+        setMotionSamples((prev) => [...prev.slice(-49), sample]);
+      }
+
+      // Shake Detection when enabled (for hardware stream)
+      if (!sample.isSimulated && settings.shakeEnabled) {
         const shakeRes = shakeDetectorRef.current.processSample(
           sample.magnitude,
           sample.deltaMagnitude,
@@ -655,15 +708,14 @@ export const SafetyProvider: React.FC<{ children: React.ReactNode }> = ({
         }
       }
 
-      // Periodic ML prediction every 1500ms if enough samples
-      const now = Date.now();
+      // Periodic ML prediction every 1200ms
       if (
-        !isMotionPaused &&
+        !isMotionPausedRef.current &&
         buffer.length >= 8 &&
-        now - lastMlCheckRef.current >= 1500
+        now - lastMlCheckRef.current >= 1200
       ) {
         lastMlCheckRef.current = now;
-        const pred = evaluateFeatures(buffer, false);
+        const pred = evaluateFeatures(buffer, sample.isSimulated);
         if (pred && pred.label === 'UNUSUAL MOVEMENT PATTERN') {
           setUnusualMovementWarning(
             'Unusual movement detected – Please check your safety.'
@@ -675,69 +727,136 @@ export const SafetyProvider: React.FC<{ children: React.ReactNode }> = ({
       settings.shakeEnabled,
       settings.shakeThreshold,
       settings.shakeCooldownSec,
-      isMotionPaused,
       evaluateFeatures,
       requestSosConfirmation,
     ]
   );
 
-  const attachMotionStream = useCallback(() => {
-    motionUnsubscribeRef.current?.();
-    const unsub = motionService.subscribe(
-      handleIncomingMotionSample,
-      () => {
-        setHasHardwareMotionData(false);
+  const stopSimMotionStream = useCallback(() => {
+    if (simIntervalRef.current !== null) {
+      window.clearInterval(simIntervalRef.current);
+      simIntervalRef.current = null;
+    }
+    setIsSimStreamActive(false);
+  }, []);
+
+  const startSimMotionStream = useCallback(
+    (scenario: SimulatorScenario) => {
+      // Stop any conflicting interval
+      if (simIntervalRef.current !== null) {
+        window.clearInterval(simIntervalRef.current);
+        simIntervalRef.current = null;
       }
-    );
-    motionUnsubscribeRef.current = unsub;
-  }, [handleIncomingMotionSample]);
+      setSimStreamScenario(scenario);
+      setIsSimStreamActive(true);
+      setIsMotionPaused(false);
+      isMotionPausedRef.current = false;
+      motionBufferRef.current = [];
+      setMotionSamples([]);
+
+      let seq = generateSyntheticSequence(scenario).samples;
+      let cursor = 0;
+
+      simIntervalRef.current = window.setInterval(() => {
+        if (isMotionPausedRef.current) return;
+        if (cursor >= seq.length) {
+          seq = generateSyntheticSequence(scenario).samples;
+          cursor = 0;
+        }
+        const template = seq[cursor++];
+        processMotionSample({
+          ...template,
+          timestamp: Date.now(),
+          isSimulated: true,
+        });
+      }, 160);
+    },
+    [processMotionSample]
+  );
 
   const startMotionMonitoring = useCallback(async () => {
+    stopSimMotionStream();
+    setHardwareProbeDone(false);
+    setHasHardwareMotionData(false);
+    motionBufferRef.current = [];
+
     if (!motionApiAvailable) {
       setMotionPermission('unsupported');
+      setHardwareProbeDone(true);
       return;
     }
+
+    // Request permission synchronously on user tap (required for iOS Safari)
     const perm = await requestMotionPermission();
     if (perm === 'denied') {
+      setHardwareProbeDone(true);
       return;
     }
+
     setIsMotionMonitoring(true);
     setIsMotionPaused(false);
-    attachMotionStream();
-  }, [motionApiAvailable, requestMotionPermission, attachMotionStream]);
+    isMotionPausedRef.current = false;
+
+    motionUnsubscribeRef.current?.();
+    motionUnsubscribeRef.current = motionService.subscribe(
+      processMotionSample,
+      () => {
+        setHasHardwareMotionData(false);
+        setHardwareProbeDone(true);
+      }
+    );
+  }, [
+    motionApiAvailable,
+    requestMotionPermission,
+    processMotionSample,
+    stopSimMotionStream,
+  ]);
 
   const pauseMotionMonitoring = useCallback(() => {
+    isMotionPausedRef.current = true;
     setIsMotionPaused(true);
   }, []);
 
   const resumeMotionMonitoring = useCallback(() => {
+    isMotionPausedRef.current = false;
     setIsMotionPaused(false);
   }, []);
 
   const stopMotionMonitoring = useCallback(() => {
     motionUnsubscribeRef.current?.();
     motionUnsubscribeRef.current = null;
+    stopSimMotionStream();
     setIsMotionMonitoring(false);
     setIsMotionPaused(false);
+    isMotionPausedRef.current = false;
     setShakePeaksCount(0);
-  }, []);
+  }, [stopSimMotionStream]);
 
-  // Re-subscribe when shake/monitoring callbacks update while active
+  // Keep background shake listener attached when shakeEnabled is turned on
   useEffect(() => {
-    if (isMotionMonitoring || settings.shakeEnabled) {
-      if (motionApiAvailable && motionPermission === 'granted') {
-        attachMotionStream();
-      }
-    } else {
+    if (settings.shakeEnabled && !isMotionMonitoring && motionApiAvailable && motionPermission === 'granted') {
       motionUnsubscribeRef.current?.();
-      motionUnsubscribeRef.current = null;
+      motionUnsubscribeRef.current = motionService.subscribe(
+        processMotionSample,
+        () => {
+          setHasHardwareMotionData(false);
+          setHardwareProbeDone(true);
+        }
+      );
+      return () => {
+        if (!isMotionMonitoring) {
+          motionUnsubscribeRef.current?.();
+          motionUnsubscribeRef.current = null;
+        }
+      };
     }
+    return undefined;
   }, [
-    isMotionMonitoring,
     settings.shakeEnabled,
+    isMotionMonitoring,
     motionApiAvailable,
     motionPermission,
-    attachMotionStream,
+    processMotionSample,
   ]);
 
   const simulateShakeTrigger = useCallback(() => {
@@ -750,31 +869,39 @@ export const SafetyProvider: React.FC<{ children: React.ReactNode }> = ({
     });
   }, [requestSosConfirmation]);
 
-  // Voice recognition
+  // Voice + Live Microphone Monitoring
   const stopVoiceListening = useCallback(() => {
     voiceSessionRef.current?.stop();
     voiceSessionRef.current = null;
     setIsVoiceListening(false);
+    setIsSpeechEngineActive(false);
+    setMicLevel(0);
   }, []);
 
-  const startVoiceListening = useCallback(() => {
-    if (!voiceSupported) {
-      setVoiceError({
-        code: 'unsupported',
-        message: 'Web Speech Recognition API is not supported in this browser.',
-        recovery:
-          'Use Chrome, Edge, or Safari with SpeechRecognition support, or use Manual SOS.',
-      });
-      return;
-    }
-
+  const startVoiceListening = useCallback(async () => {
     voiceSessionRef.current?.stop();
     setVoiceError(null);
 
     const session = voiceRecognitionService.createSession(
       settings.voiceCommands,
       {
+        lang: voiceLang,
+        acousticSpikeEnabled,
+        acousticThreshold: 80,
+      },
+      {
         onStatusChange: (active) => setIsVoiceListening(active),
+        onSpeechEngineChange: (active) => setIsSpeechEngineActive(active),
+        onMicLevelChange: (lvl) => setMicLevel(lvl),
+        onAcousticSpike: (peakLevel) => {
+          requestSosConfirmation({
+            source: 'VOICE',
+            title: 'High-Volume Distress Sound Detected',
+            description:
+              'Microphone detected sustained loud acoustic energy. Confirm immediately to activate SOS, or cancel if caused by background noise.',
+            detectedTriggerDetail: `Acoustic peak level: ${peakLevel}%`,
+          });
+        },
         onTranscript: (transcript, _isFinal, alternatives) => {
           setVoiceTranscript(transcript);
           setVoiceAlternatives(alternatives);
@@ -794,11 +921,14 @@ export const SafetyProvider: React.FC<{ children: React.ReactNode }> = ({
       }
     );
 
-    if (session) {
-      voiceSessionRef.current = session;
-      session.start();
-    }
-  }, [voiceSupported, settings.voiceCommands, requestSosConfirmation]);
+    voiceSessionRef.current = session;
+    await session.start();
+  }, [
+    settings.voiceCommands,
+    voiceLang,
+    acousticSpikeEnabled,
+    requestSosConfirmation,
+  ]);
 
   // Safe Journey actions
   const startJourney = useCallback(
@@ -899,6 +1029,9 @@ export const SafetyProvider: React.FC<{ children: React.ReactNode }> = ({
         isMotionMonitoring,
         isMotionPaused,
         hasHardwareMotionData,
+        hardwareProbeDone,
+        isSimStreamActive,
+        simStreamScenario,
         motionSamples,
         unusualMovementWarning,
         dismissUnusualWarning: () => setUnusualMovementWarning(null),
@@ -907,8 +1040,17 @@ export const SafetyProvider: React.FC<{ children: React.ReactNode }> = ({
         pauseMotionMonitoring,
         resumeMotionMonitoring,
         stopMotionMonitoring,
+        startSimMotionStream,
+        stopSimMotionStream,
         voiceSupported,
+        micSupported,
         isVoiceListening,
+        isSpeechEngineActive,
+        micLevel,
+        voiceLang,
+        setVoiceLang,
+        acousticSpikeEnabled,
+        setAcousticSpikeEnabled,
         voiceTranscript,
         voiceAlternatives,
         voiceError,

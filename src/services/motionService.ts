@@ -47,18 +47,24 @@ export const motionService = {
       if (!receivedValidSample) {
         onNoHardwareData?.();
       }
-    }, 1800);
+    }, 1400);
 
     const handler = (event: DeviceMotionEvent) => {
-      const acc = event.accelerationIncludingGravity ?? event.acceleration;
-      if (!acc || (acc.x === null && acc.y === null && acc.z === null)) {
+      const inc = event.accelerationIncludingGravity;
+      const lin = event.acceleration;
+      const hasInc =
+        inc && (inc.x !== null || inc.y !== null || inc.z !== null);
+      const hasLin =
+        lin && (lin.x !== null || lin.y !== null || lin.z !== null);
+
+      if (!hasInc && !hasLin) {
         return;
       }
 
       receivedValidSample = true;
-      const ax = acc.x ?? 0;
-      const ay = acc.y ?? 0;
-      const az = acc.z ?? 0;
+      const ax = (hasInc ? inc?.x : lin?.x) ?? 0;
+      const ay = (hasInc ? inc?.y : lin?.y) ?? 0;
+      const az = (hasInc ? inc?.z : lin?.z) ?? (hasLin ? 9.81 : 0);
       const magnitude = Math.sqrt(ax * ax + ay * ay + az * az);
       const deltaMagnitude = Math.abs(magnitude - prevMagnitude);
       prevMagnitude = magnitude;
@@ -74,7 +80,7 @@ export const motionService = {
       });
     };
 
-    window.addEventListener('devicemotion', handler);
+    window.addEventListener('devicemotion', handler, { passive: true });
 
     return () => {
       window.clearTimeout(hardwareTimer);

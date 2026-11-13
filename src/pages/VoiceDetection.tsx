@@ -6,6 +6,7 @@ import {
   Plus,
   ShieldAlert,
   Trash2,
+  Volume2,
 } from 'lucide-react';
 import { useSafety } from '../context/SafetyContext';
 import { voiceRecognitionService } from '../services/voiceRecognitionService';
@@ -15,7 +16,14 @@ export const VoiceDetection: React.FC = () => {
     settings,
     updateSettings,
     voiceSupported,
+    micSupported,
     isVoiceListening,
+    isSpeechEngineActive,
+    micLevel,
+    voiceLang,
+    setVoiceLang,
+    acousticSpikeEnabled,
+    setAcousticSpikeEnabled,
     voiceTranscript,
     voiceAlternatives,
     voiceError,
@@ -60,16 +68,27 @@ export const VoiceDetection: React.FC = () => {
       settings.voiceCommands
     );
     if (matched) {
+      setPhraseError(null);
       requestSosConfirmation({
         source: 'VOICE',
-        title: `Simulated Phrase Matched: "${matched}"`,
+        title: `Phrase Matched: "${matched}"`,
         description:
-          'Text-based command matcher detected a configured emergency phrase. Confirm or cancel SOS.',
-        detectedTriggerDetail: `Simulated input: "${testInput}"`,
+          'Emergency command matcher detected a configured phrase. Confirm or cancel SOS.',
+        detectedTriggerDetail: `Input: "${testInput}"`,
       });
     } else {
       setPhraseError('No configured emergency command matched that test phrase.');
     }
+  };
+
+  const triggerQuickPhrase = (phrase: string) => {
+    requestSosConfirmation({
+      source: 'VOICE',
+      title: `Voice Phrase Triggered: "${phrase}"`,
+      description:
+        'Confirmed emergency phrase check. Click Confirm & Activate SOS or Cancel Alert.',
+      detectedTriggerDetail: `Phrase: "${phrase}"`,
+    });
   };
 
   return (
@@ -80,7 +99,7 @@ export const VoiceDetection: React.FC = () => {
             Voice Emergency Command Detection
           </h2>
           <p className="text-sm text-[#4B4560]">
-            Listens for configured distress phrases via the browser Web Speech API and opens an immediate SOS confirmation dialog. Audio is never recorded or stored.
+            Uses your browser&apos;s built-in microphone and Web Speech API (zero external API keys). Audio is analyzed in real time in memory and never recorded or saved.
           </p>
         </div>
 
@@ -101,7 +120,7 @@ export const VoiceDetection: React.FC = () => {
         </button>
       </div>
 
-      {/* Recognition Control Card */}
+      {/* Recognition & Live Microphone Monitor Card */}
       <div className="rounded-xl bg-white border border-[#EAE4F2] p-6 space-y-5 shadow-xs">
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div className="flex items-center gap-3">
@@ -120,46 +139,98 @@ export const VoiceDetection: React.FC = () => {
             </div>
             <div>
               <div className="font-display text-base font-semibold text-[#1E1B2E]">
-                {!voiceSupported
-                  ? 'Speech Recognition Unsupported in This Browser'
-                  : isVoiceListening
-                    ? 'Voice Recognition Active — Listening'
-                    : 'Voice Recognition Standby'}
+                {isVoiceListening
+                  ? isSpeechEngineActive
+                    ? 'Listening — Speech & Acoustic Detection Active'
+                    : 'Listening — Live Microphone Acoustic Mode'
+                  : 'Voice & Microphone Detection Standby'}
               </div>
               <div className="text-xs text-[#5B5570]">
-                Web Speech API: {voiceSupported ? 'Supported' : 'Not Available'} · No continuous audio saved
+                Microphone API: {micSupported ? 'Available' : 'Unavailable'} · Speech Recognition:{' '}
+                {voiceSupported ? 'Supported' : 'Not Supported in Browser'}
               </div>
             </div>
           </div>
 
-          {voiceSupported && (
-            <div className="flex items-center gap-2">
-              {!isVoiceListening ? (
-                <button
-                  type="button"
-                  onClick={startVoiceListening}
-                  className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-purple-600 hover:bg-purple-700 text-xs font-semibold text-white whitespace-nowrap cursor-pointer"
-                >
-                  <Mic className="w-4 h-4" aria-hidden="true" />
-                  <span>Start Voice Detection</span>
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  onClick={stopVoiceListening}
-                  className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-purple-50 hover:bg-purple-100 border border-purple-200 text-xs font-semibold text-purple-900 whitespace-nowrap cursor-pointer"
-                >
-                  <MicOff className="w-4 h-4" aria-hidden="true" />
-                  <span>Stop Listening</span>
-                </button>
-              )}
-            </div>
-          )}
+          <div className="flex flex-wrap items-center gap-2">
+            <select
+              value={voiceLang}
+              onChange={(e) => setVoiceLang(e.target.value)}
+              disabled={isVoiceListening}
+              aria-label="Speech recognition language"
+              className="px-3 py-2 rounded-lg bg-[#FAF8FC] border border-[#DCD4EA] text-xs text-[#1E1B2E] disabled:opacity-60"
+            >
+              <option value="en-US">English (US)</option>
+              <option value="en-IN">English (India)</option>
+              <option value="en-GB">English (UK)</option>
+            </select>
+
+            {!isVoiceListening ? (
+              <button
+                type="button"
+                onClick={() => void startVoiceListening()}
+                disabled={!micSupported && !voiceSupported}
+                className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-purple-600 hover:bg-purple-700 disabled:opacity-50 text-xs font-semibold text-white whitespace-nowrap cursor-pointer"
+              >
+                <Mic className="w-4 h-4" aria-hidden="true" />
+                <span>Start Voice Detection</span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={stopVoiceListening}
+                className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-purple-50 hover:bg-purple-100 border border-purple-200 text-xs font-semibold text-purple-900 whitespace-nowrap cursor-pointer"
+              >
+                <MicOff className="w-4 h-4" aria-hidden="true" />
+                <span>Stop Listening</span>
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Live Microphone Volume Meter (Web Audio AnalyserNode - 100% offline/no API) */}
+        <div className="p-4 rounded-lg bg-[#FAF8FC] border border-[#EAE4F2] space-y-2.5">
+          <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+            <span className="inline-flex items-center gap-1.5 font-medium text-[#342E49]">
+              <Volume2 className="w-4 h-4 text-purple-600" aria-hidden="true" />
+              <span>Live Microphone Input Level (Browser AudioContext)</span>
+            </span>
+            <span className="font-mono font-semibold text-purple-700 tabular-nums">
+              {micLevel}%
+            </span>
+          </div>
+
+          <div className="h-2.5 w-full rounded-full bg-purple-100 overflow-hidden">
+            <div
+              className={`h-full transition-all duration-75 ${
+                micLevel >= 80
+                  ? 'bg-red-600'
+                  : micLevel >= 45
+                    ? 'bg-purple-600'
+                    : 'bg-teal-600'
+              }`}
+              style={{ width: `${micLevel}%` }}
+            />
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+            <label className="flex items-center gap-2 text-xs text-[#4B4560] cursor-pointer">
+              <input
+                type="checkbox"
+                checked={acousticSpikeEnabled}
+                onChange={(e) => setAcousticSpikeEnabled(e.target.checked)}
+                className="h-3.5 w-3.5 rounded border-purple-300 text-purple-600"
+              />
+              <span>
+                Enable Offline Acoustic Distress Trigger (triggers confirmation if sustained sound ≥ 80% without needing cloud speech-to-text)
+              </span>
+            </label>
+          </div>
         </div>
 
         {!voiceSupported && (
           <div className="p-4 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-950 leading-relaxed">
-            Your current browser does not expose <code className="font-mono">SpeechRecognition</code> or <code className="font-mono">webkitSpeechRecognition</code> (Firefox desktop and some privacy browsers disable it). You can still use the Manual SOS button or test phrase matching below.
+            Your browser does not support <code className="font-mono">SpeechRecognition</code> phrase transcription (e.g., Firefox or certain webviews). Live Microphone Acoustic Monitoring above works offline with zero API dependencies, and you can also use Manual SOS or Phrase Simulation below.
           </div>
         )}
 
@@ -180,7 +251,12 @@ export const VoiceDetection: React.FC = () => {
             Live Speech Transcript (Processed in memory only)
           </div>
           <div className="font-mono text-sm text-[#1E1B2E] min-h-[24px]">
-            {voiceTranscript || (isVoiceListening ? 'Listening for speech...' : 'Idle')}
+            {voiceTranscript ||
+              (isVoiceListening
+                ? isSpeechEngineActive
+                  ? 'Listening for distress phrases...'
+                  : 'Acoustic microphone monitor active (speak loudly to test spike or test phrases below)'
+                : 'Idle')}
           </div>
           {voiceAlternatives.length > 1 && (
             <div className="text-xs text-[#5B5570]">
@@ -190,6 +266,7 @@ export const VoiceDetection: React.FC = () => {
         </div>
       </div>
 
+      {/* Configurable Emergency Phrases & Instant Tester */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <div className="rounded-xl bg-white border border-[#EAE4F2] p-5 space-y-4 shadow-xs">
           <h3 className="font-display text-base font-semibold text-[#1E1B2E]">
@@ -216,9 +293,7 @@ export const VoiceDetection: React.FC = () => {
             </button>
           </form>
 
-          {phraseError && (
-            <p className="text-xs text-rose-700">{phraseError}</p>
-          )}
+          {phraseError && <p className="text-xs text-rose-700">{phraseError}</p>}
 
           <ul className="divide-y divide-[#EAE4F2] border border-[#EAE4F2] rounded-lg bg-[#FAF8FC]">
             {settings.voiceCommands.map((cmd) => (
@@ -243,10 +318,10 @@ export const VoiceDetection: React.FC = () => {
 
         <div className="rounded-xl bg-white border border-[#EAE4F2] p-5 space-y-4 shadow-xs">
           <h3 className="font-display text-base font-semibold text-[#1E1B2E]">
-            Phrase Matcher Verification (Text Simulation)
+            Phrase Matcher & Quick Verification
           </h3>
           <p className="text-xs text-[#5B5570]">
-            Test how the emergency command matcher responds without needing an active microphone or supported SpeechRecognition browser.
+            Test how the command matcher responds across any browser without requiring cloud speech-to-text servers.
           </p>
           <form onSubmit={handleSimulatedTranscriptTest} className="space-y-3">
             <input
@@ -258,11 +333,29 @@ export const VoiceDetection: React.FC = () => {
             />
             <button
               type="submit"
-              className="px-4 py-2 rounded-lg bg-purple-50 hover:bg-purple-100 border border-purple-200 text-xs font-semibold text-purple-900 cursor-pointer"
+              className="px-4 py-2 rounded-lg bg-purple-600 hover:bg-purple-700 text-xs font-semibold text-white cursor-pointer"
             >
               Test Command Match
             </button>
           </form>
+
+          <div className="pt-2 border-t border-[#EAE4F2] space-y-2">
+            <div className="text-xs font-medium text-[#5B5570]">
+              One-Tap Command Trigger Test:
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {settings.voiceCommands.map((cmd) => (
+                <button
+                  key={cmd}
+                  type="button"
+                  onClick={() => triggerQuickPhrase(cmd)}
+                  className="px-3 py-1.5 rounded-lg bg-[#FAF8FC] hover:bg-purple-50 border border-[#DCD4EA] text-xs font-mono text-[#342E49] cursor-pointer"
+                >
+                  "{cmd}"
+                </button>
+              ))}
+            </div>
+          </div>
         </div>
       </div>
     </div>

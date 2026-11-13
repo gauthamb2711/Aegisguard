@@ -5,8 +5,12 @@ import { MovementMonitor } from '../components/MovementMonitor';
 import { useSafety } from '../context/SafetyContext';
 
 export const MovementMonitoring: React.FC = () => {
-  const { motionSamples, latestPrediction, requestSosConfirmation } =
-    useSafety();
+  const {
+    motionSamples,
+    latestPrediction,
+    isSimStreamActive,
+    requestSosConfirmation,
+  } = useSafety();
 
   const recentSamples = [...motionSamples].reverse().slice(0, 8);
 
@@ -36,7 +40,7 @@ export const MovementMonitoring: React.FC = () => {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <div className="rounded-xl bg-white border border-[#EAE4F2] p-5 space-y-4 shadow-xs">
           <h3 className="font-display text-base font-semibold text-[#1E1B2E]">
-            Recent Sensor Samples (Live Hardware Only)
+            Recent Sensor Samples ({isSimStreamActive ? 'SIMULATED STREAM' : 'Live Hardware'})
           </h3>
           {recentSamples.length > 0 ? (
             <div className="overflow-x-auto">

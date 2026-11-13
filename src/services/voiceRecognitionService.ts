@@ -44,6 +44,9 @@ type SpeechRecognitionConstructor = new () => SpeechRecognitionInstance;
 
 export interface VoiceRecognitionCallbacks {
   onStatusChange: (active: boolean) => void;
+  onSpeechEngineChange: (active: boolean) => void;
+  onMicLevelChange: (levelPercent: number) => void;
+  onAcousticSpike?: (peakLevel: number) => void;
   onTranscript: (transcript: string, isFinal: boolean, alternatives: string[]) => void;
   onCommandMatch: (matchedCommand: string, fullTranscript: string) => void;
   onError: (errorCode: string, message: string, recovery: string) => void;
@@ -63,6 +66,13 @@ export const voiceRecognitionService = {
     return getSpeechRecognitionConstructor() !== null;
   },
 
+  isMicrophoneSupported(): boolean {
+    return (
+      typeof navigator !== 'undefined' &&
+      Boolean(navigator.mediaDevices?.getUserMedia)
+    );
+  },
+
   mapSpeechError(errorCode: string): { message: string; recovery: string } {
     switch (errorCode) {
       case 'not-allowed':
@@ -70,26 +80,26 @@ export const voiceRecognitionService = {
         return {
           message: 'Microphone permission was denied or blocked by browser settings.',
           recovery:
-            'Allow Microphone permission in the browser address bar and click Start Listening again. Manual SOS remains fully available.',
+            'Click the lock/site icon in your browser address bar, allow Microphone access, and click Start Voice Detection again.',
         };
       case 'audio-capture':
         return {
           message: 'No working microphone input device was detected.',
           recovery:
-            'Connect or unmute a microphone in system audio settings, or use the manual SOS button.',
+            'Connect or unmute a microphone in your device settings, or use the manual SOS button.',
         };
       case 'no-speech':
         return {
-          message: 'No speech was detected during the listening window.',
+          message: 'No speech was detected recently—still listening.',
           recovery:
-            'Speak clearly near the microphone, or use the simulated phrase check if testing without voice input.',
+            'Speak clearly near the microphone using one of your configured phrases.',
         };
       case 'network':
         return {
           message:
-            'Browser speech recognition engine reported a network error (some browsers require online speech servers).',
+            'Browser speech-to-text engine could not reach its cloud service (common on Firefox, Brave, or restricted networks). Live microphone acoustic monitoring remains active.',
           recovery:
-            'Check internet connectivity. Manual SOS works offline without speech recognition.',
+            'Use Chrome/Edge/Safari with internet for phrase transcription, or rely on the active Acoustic Loudness Trigger or Manual SOS.',
         };
       case 'aborted':
         return {
@@ -98,8 +108,8 @@ export const voiceRecognitionService = {
         };
       default:
         return {
-          message: `Speech recognition error (${errorCode}).`,
-          recovery: 'Restart voice recognition or use manual SOS.',
+          message: `Speech recognition notice (${errorCode}).`,
+          recovery: 'Acoustic microphone monitoring or manual SOS remains available.',
         };
     }
   },
@@ -122,25 +132,130 @@ export const voiceRecognitionService = {
     return null;
   },
 
+  /**
+   * Starts a zero-API-key browser voice + live microphone monitoring session.
+   * Requests microphone permission via getUserMedia (for real-time level & acoustic spike fallback),
+   * and runs Web Speech API phrase detection in parallel when supported.
+   * Never records or saves audio files.
+   */
   createSession(
     commands: string[],
+    options: { lang?: string; acousticSpikeEnabled?: boolean; acousticThreshold?: number },
     callbacks: VoiceRecognitionCallbacks
-  ): { start: () => void; stop: () => void } | null {
-    const Ctor = getSpeechRecognitionConstructor();
-    if (!Ctor) return null;
-
+  ): { start: () => Promise<void>; stop: () => void } {
     let recognition: SpeechRecognitionInstance | null = null;
     let shouldStayActive = false;
+    let restartTimer: number | null = null;
+    let mediaStream: MediaStream | null = null;
+    let audioCtx: AudioContext | null = null;
+    let rafId: number | null = null;
+    let highEnergyFrames = 0;
+    let lastAcousticTrigger = 0;
 
-    const initInstance = () => {
+    const cleanupAudio = () => {
+      if (rafId !== null) {
+        window.cancelAnimationFrame(rafId);
+        rafId = null;
+      }
+      if (mediaStream) {
+        mediaStream.getTracks().forEach((t) => t.stop());
+        mediaStream = null;
+      }
+      if (audioCtx && audioCtx.state !== 'closed') {
+        void audioCtx.close();
+        audioCtx = null;
+      }
+      callbacks.onMicLevelChange(0);
+    };
+
+    const startAudioMonitor = async (): Promise<boolean> => {
+      if (!this.isMicrophoneSupported()) {
+        return true; // Allow SpeechRecognition to request its own mic if getUserMedia absent
+      }
+      try {
+        mediaStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+        });
+
+        const AudioCtx =
+          window.AudioContext ||
+          (window as unknown as { webkitAudioContext?: typeof AudioContext })
+            .webkitAudioContext;
+
+        if (AudioCtx && mediaStream) {
+          audioCtx = new AudioCtx();
+          const source = audioCtx.createMediaStreamSource(mediaStream);
+          const analyser = audioCtx.createAnalyser();
+          analyser.fftSize = 256;
+          source.connect(analyser);
+
+          const data = new Uint8Array(analyser.frequencyBinCount);
+          const threshold = options.acousticThreshold ?? 78;
+
+          const tick = () => {
+            if (!shouldStayActive) return;
+            analyser.getByteTimeDomainData(data);
+            let sumSquares = 0;
+            for (let i = 0; i < data.length; i++) {
+              const norm = (data[i] - 128) / 128;
+              sumSquares += norm * norm;
+            }
+            const rms = Math.sqrt(sumSquares / data.length);
+            const level = Math.min(100, Math.round(rms * 260));
+            callbacks.onMicLevelChange(level);
+
+            if (options.acousticSpikeEnabled) {
+              if (level >= threshold) {
+                highEnergyFrames++;
+                const now = Date.now();
+                if (highEnergyFrames >= 12 && now - lastAcousticTrigger > 10000) {
+                  lastAcousticTrigger = now;
+                  highEnergyFrames = 0;
+                  callbacks.onAcousticSpike?.(level);
+                }
+              } else {
+                highEnergyFrames = Math.max(0, highEnergyFrames - 1);
+              }
+            }
+
+            rafId = window.requestAnimationFrame(tick);
+          };
+
+          rafId = window.requestAnimationFrame(tick);
+        }
+        return true;
+      } catch (err) {
+        const errName = err instanceof Error ? err.name : '';
+        const mapped =
+          errName === 'NotAllowedError' || errName === 'PermissionDeniedError'
+            ? this.mapSpeechError('not-allowed')
+            : errName === 'NotFoundError'
+              ? this.mapSpeechError('audio-capture')
+              : this.mapSpeechError('not-allowed');
+        callbacks.onError(errName || 'not-allowed', mapped.message, mapped.recovery);
+        return false;
+      }
+    };
+
+    const startSpeechEngine = () => {
+      const Ctor = getSpeechRecognitionConstructor();
+      if (!Ctor) {
+        callbacks.onSpeechEngineChange(false);
+        return;
+      }
+
       const rec = new Ctor();
       rec.continuous = true;
       rec.interimResults = true;
-      rec.lang = 'en-US';
+      rec.lang = options.lang || 'en-US';
       rec.maxAlternatives = 3;
 
       rec.onstart = () => {
-        callbacks.onStatusChange(true);
+        callbacks.onSpeechEngineChange(true);
       };
 
       rec.onresult = (event) => {
@@ -165,50 +280,83 @@ export const voiceRecognitionService = {
 
       rec.onerror = (event) => {
         const mapped = this.mapSpeechError(event.error);
-        if (event.error === 'not-allowed' || event.error === 'service-not-allowed' || event.error === 'audio-capture') {
+        if (
+          event.error === 'not-allowed' ||
+          event.error === 'service-not-allowed' ||
+          event.error === 'audio-capture'
+        ) {
           shouldStayActive = false;
+          callbacks.onSpeechEngineChange(false);
           callbacks.onStatusChange(false);
+          cleanupAudio();
+          callbacks.onError(event.error, mapped.message, mapped.recovery);
+          return;
         }
-        callbacks.onError(event.error, mapped.message, mapped.recovery);
+
+        if (event.error === 'network') {
+          // Speech-to-text cloud failed, but keep live microphone acoustic monitor running!
+          callbacks.onSpeechEngineChange(false);
+          callbacks.onError(event.error, mapped.message, mapped.recovery);
+          return;
+        }
+
+        if (event.error !== 'no-speech' && event.error !== 'aborted') {
+          callbacks.onError(event.error, mapped.message, mapped.recovery);
+        }
       };
 
       rec.onend = () => {
+        callbacks.onSpeechEngineChange(false);
         if (shouldStayActive) {
-          try {
-            rec.start();
-          } catch {
-            shouldStayActive = false;
-            callbacks.onStatusChange(false);
-          }
-        } else {
-          callbacks.onStatusChange(false);
+          if (restartTimer !== null) window.clearTimeout(restartTimer);
+          restartTimer = window.setTimeout(() => {
+            if (!shouldStayActive) return;
+            try {
+              rec.start();
+            } catch {
+              // Ignore InvalidStateError if already restarting
+            }
+          }, 350);
         }
       };
 
-      return rec;
+      recognition = rec;
+      try {
+        rec.start();
+      } catch {
+        // Safe ignore
+      }
     };
 
     return {
-      start: () => {
+      start: async () => {
         shouldStayActive = true;
-        if (!recognition) {
-          recognition = initInstance();
+        const micOk = await startAudioMonitor();
+        if (!micOk) {
+          shouldStayActive = false;
+          callbacks.onStatusChange(false);
+          return;
         }
-        try {
-          recognition.start();
-        } catch {
-          // Ignore InvalidStateError if already started
-        }
+        callbacks.onStatusChange(true);
+        startSpeechEngine();
       },
       stop: () => {
         shouldStayActive = false;
+        if (restartTimer !== null) {
+          window.clearTimeout(restartTimer);
+          restartTimer = null;
+        }
         if (recognition) {
           try {
+            recognition.onend = null;
             recognition.stop();
           } catch {
             // Safe ignore
           }
+          recognition = null;
         }
+        cleanupAudio();
+        callbacks.onSpeechEngineChange(false);
         callbacks.onStatusChange(false);
       },
     };

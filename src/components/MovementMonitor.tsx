@@ -1,5 +1,4 @@
 import React from 'react';
-import { Link } from 'react-router-dom';
 import {
   Activity,
   AlertTriangle,
@@ -17,6 +16,15 @@ import {
   YAxis,
 } from 'recharts';
 import { useSafety } from '../context/SafetyContext';
+import { SimulatorScenario } from '../types/safety';
+
+const SIM_STREAM_OPTIONS: { id: SimulatorScenario; label: string }[] = [
+  { id: 'normal_walking', label: 'Simulate Normal Walking' },
+  { id: 'running', label: 'Simulate Running' },
+  { id: 'fall_like', label: 'Simulate Fall-Like Pattern' },
+  { id: 'sudden_movement', label: 'Simulate Sudden Movement' },
+  { id: 'irregular_movement', label: 'Simulate Irregular Motion' },
+];
 
 export const MovementMonitor: React.FC = () => {
   const {
@@ -25,6 +33,9 @@ export const MovementMonitor: React.FC = () => {
     isMotionMonitoring,
     isMotionPaused,
     hasHardwareMotionData,
+    hardwareProbeDone,
+    isSimStreamActive,
+    simStreamScenario,
     motionSamples,
     latestPrediction,
     mlTrained,
@@ -32,6 +43,8 @@ export const MovementMonitor: React.FC = () => {
     pauseMotionMonitoring,
     resumeMotionMonitoring,
     stopMotionMonitoring,
+    startSimMotionStream,
+    stopSimMotionStream,
   } = useSafety();
 
   const chartData = motionSamples.map((s, idx) => ({
@@ -46,6 +59,8 @@ export const MovementMonitor: React.FC = () => {
     magnitude: s.magnitude,
   }));
 
+  const isStreaming = isMotionMonitoring || isSimStreamActive;
+
   return (
     <div className="rounded-xl bg-white border border-[#EAE4F2] p-5 space-y-5 shadow-xs">
       <div className="flex flex-wrap items-center justify-between gap-4">
@@ -58,9 +73,16 @@ export const MovementMonitor: React.FC = () => {
               Live DeviceMotion Sensor Monitor
             </h3>
             <p className="text-xs text-[#5B5570]">
-              <span>API: {motionApiAvailable ? 'Present' : 'Unsupported'}</span>
-              <span aria-hidden="true"> · </span>
-              <span>Permission: {motionPermission}</span>
+              <span>
+                Source:{' '}
+                {isSimStreamActive
+                  ? 'SIMULATED STREAM (Desktop Demo Mode)'
+                  : hasHardwareMotionData
+                    ? 'LIVE HARDWARE SENSOR'
+                    : motionApiAvailable
+                      ? `API Present (${motionPermission})`
+                      : 'Sensor Unsupported'}
+              </span>
               <span aria-hidden="true"> · </span>
               <span>
                 ML Model: {mlTrained ? 'Random Forest Ready' : 'Not Trained'}
@@ -70,16 +92,26 @@ export const MovementMonitor: React.FC = () => {
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          {!isMotionMonitoring ? (
-            <button
-              type="button"
-              onClick={() => void startMotionMonitoring()}
-              disabled={!motionApiAvailable}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-purple-600 hover:bg-purple-700 disabled:opacity-50 text-xs font-semibold text-white transition-colors whitespace-nowrap cursor-pointer"
-            >
-              <Play className="w-3.5 h-3.5" aria-hidden="true" />
-              <span>Start Monitoring</span>
-            </button>
+          {!isStreaming ? (
+            <>
+              <button
+                type="button"
+                onClick={() => void startMotionMonitoring()}
+                disabled={!motionApiAvailable}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-purple-600 hover:bg-purple-700 disabled:opacity-50 text-xs font-semibold text-white transition-colors whitespace-nowrap cursor-pointer"
+              >
+                <Play className="w-3.5 h-3.5" aria-hidden="true" />
+                <span>Start Hardware Sensor</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => startSimMotionStream('normal_walking')}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-teal-700 hover:bg-teal-800 text-xs font-semibold text-white transition-colors whitespace-nowrap cursor-pointer"
+              >
+                <Play className="w-3.5 h-3.5" aria-hidden="true" />
+                <span>Start Simulated Stream</span>
+              </button>
+            </>
           ) : (
             <>
               {isMotionPaused ? (
@@ -116,24 +148,64 @@ export const MovementMonitor: React.FC = () => {
 
       {motionPermission === 'denied' && (
         <div className="p-3.5 rounded-lg bg-rose-50 border border-rose-200 text-xs text-red-800">
-          Motion sensor permission was denied. Enable Motion & Orientation access in your browser/device settings (on iOS Safari, open Settings or reload over HTTPS and accept the prompt), or use the Movement Simulator below.
+          Motion sensor permission was denied. Grant Motion & Orientation permission on mobile, or click "Start Simulated Stream" above for desktop testing.
         </div>
       )}
 
-      {isMotionMonitoring && !hasHardwareMotionData && (
-        <div className="p-3.5 rounded-lg bg-amber-50 border border-amber-200 flex flex-wrap items-center justify-between gap-3 text-xs text-amber-950">
-          <div className="flex items-start gap-2">
+      {isMotionMonitoring && hardwareProbeDone && !hasHardwareMotionData && !isSimStreamActive && (
+        <div className="p-4 rounded-lg bg-amber-50 border border-amber-200 flex flex-wrap items-center justify-between gap-3 text-xs text-amber-950">
+          <div className="flex items-start gap-2 max-w-2xl">
             <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" aria-hidden="true" />
             <span>
-              No physical accelerometer events detected from this browser (common on laptops and desktop browsers). No fake sensor readings are generated. Use the Movement Sensor Simulator to test ML classification.
+              <strong>No physical accelerometer detected on this device</strong> (normal for laptops and desktop browsers). No fake hardware readings are generated. Click below to run a clearly labeled live simulated stream instead.
             </span>
           </div>
-          <Link
-            to="/ml-lab"
-            className="px-3 py-1.5 rounded-lg bg-white hover:bg-amber-100 border border-amber-300 text-purple-800 font-semibold whitespace-nowrap"
+          <button
+            type="button"
+            onClick={() => {
+              stopMotionMonitoring();
+              startSimMotionStream('normal_walking');
+            }}
+            className="px-3.5 py-2 rounded-lg bg-purple-600 hover:bg-purple-700 text-white font-semibold whitespace-nowrap cursor-pointer"
           >
-            Open Simulator
-          </Link>
+            Switch to Simulated Stream
+          </button>
+        </div>
+      )}
+
+      {/* Simulated Stream Scenario Switcher */}
+      {(isSimStreamActive || (hardwareProbeDone && !hasHardwareMotionData)) && (
+        <div className="p-3.5 rounded-lg bg-[#FAF8FC] border border-[#EAE4F2] space-y-2.5">
+          <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+            <span className="font-semibold text-purple-900">
+              SIMULATED MOVEMENT STREAM (No hardware sensor required)
+            </span>
+            {isSimStreamActive && (
+              <button
+                type="button"
+                onClick={stopSimMotionStream}
+                className="text-rose-700 hover:underline font-medium cursor-pointer"
+              >
+                Stop Simulation
+              </button>
+            )}
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {SIM_STREAM_OPTIONS.map((opt) => (
+              <button
+                key={opt.id}
+                type="button"
+                onClick={() => startSimMotionStream(opt.id)}
+                className={`px-3 py-1.5 rounded-lg border text-xs font-medium transition-colors whitespace-nowrap cursor-pointer ${
+                  isSimStreamActive && simStreamScenario === opt.id
+                    ? 'bg-purple-600 border-purple-600 text-white'
+                    : 'bg-white border-[#DCD4EA] text-[#342E49] hover:bg-purple-50'
+                }`}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
         </div>
       )}
 
@@ -193,21 +265,21 @@ export const MovementMonitor: React.FC = () => {
             <p className="text-sm font-medium text-[#342E49]">
               {isMotionMonitoring
                 ? 'Listening for hardware DeviceMotion events...'
-                : 'Live motion monitoring is idle'}
+                : 'Movement monitor is ready'}
             </p>
             <p className="mt-1 text-xs text-[#5B5570] max-w-md">
-              Start monitoring on a mobile phone or tablet with accelerometer hardware, or test the Random Forest model using the Movement Sensor Simulator.
+              Use "Start Hardware Sensor" on mobile devices with an accelerometer, or click "Start Simulated Stream" on laptops and desktops.
             </p>
           </div>
         )}
       </div>
 
-      {/* Latest Live Prediction Summary */}
-      {latestPrediction && !latestPrediction.isSimulated && (
+      {/* Latest Classification Summary */}
+      {latestPrediction && (
         <div className="p-4 rounded-lg bg-[#FAF8FC] border border-[#EAE4F2] flex flex-wrap items-center justify-between gap-4">
           <div>
             <div className="text-xs text-[#5B5570]">
-              Latest Live Sensor Classification ·{' '}
+              {latestPrediction.isSimulated ? 'SIMULATED STREAM' : 'LIVE HARDWARE SENSOR'} ·{' '}
               {new Date(latestPrediction.timestamp).toLocaleTimeString()}
             </div>
             <div
